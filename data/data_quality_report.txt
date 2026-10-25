@@ -1,0 +1,43 @@
+DATA QUALITY REPORT
+===================
+Source speed file : data/sample/speeds_sample.csv
+Rows x sensors    : 576 x 207
+Time range        : 2012-03-01 06:00:00  ->  2012-03-03 05:55:00
+First / last day  : Thursday / Saturday
+
+ID CONSISTENCY
+  speed IDs == ID list (same order)      : True
+  speed IDs == location file IDs (as set): True
+  speed IDs found in distance file       : 207 of 207
+  distance file covers 4106 sensors in total (the whole LA network, not only these 207)
+
+TIMESTAMPS
+  strictly increasing : True
+  duplicate timestamps: 0
+  spacing (seconds -> count): {300: 575}
+
+WHOLE NETWORK (information only, all 207 sensors)
+  missing cells (zero/NaN): 5055 of 119232 (4.24%)
+  timestamps where EVERY sensor is missing: 2
+     2012-03-01 06:15:00
+     2012-03-01 06:20:00
+
+SELECTED SENSORS: 716328, 716331, 716337, 717446, 717456, 773062
+  policy: zero/NaN/negative = missing; carry the last real reading forward for up to 6 steps (30 min); after that the value stays empty
+  sensor   missing  missing%  imputed  left_empty  implausible(>85)  longest_identical_run  min   mean   max
+  716328        2     0.35%        2           0                 0                      1  8.4  56.8  69.0
+  716331        2     0.35%        2           0                 0                      2  12.1  47.8  69.4
+  716337        2     0.35%        2           0                 0                      3  11.2  56.5  66.6
+  717446        2     0.35%        2           0                 0                      2  12.0  48.5  69.8
+  717456        2     0.35%        2           0                 0                      2  7.9  62.2  70.0
+  773062        2     0.35%        2           0                 0                      2  24.9  57.0  68.4
+  TOTAL         12                 12           0
+  missing-run length histogram over the six sensors (steps -> runs): {2: 6}
+  rows before cleaning: 576 | rows after cleaning: 576 (no rows are dropped, so the 5-minute grid stays regular)
+
+GRAPH (distance file, meters)
+  nodes: 6 | directed edges found: 30 of 30 possible
+  distance min/max: 336.5 / 7819.8 m
+  edges whose reverse edge also exists: 30
+  strongly connected: True
+  note: self-distance rows (0.0) are omitted; no edge was invented or removed.
