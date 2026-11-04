@@ -31,7 +31,11 @@ static std::vector<std::vector<double>> naiveRead(const std::string& path, std::
 static std::string readText(const std::string& path) {
     std::ifstream in(path.c_str(), std::ios::binary);
     std::string s((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    return s;
+    std::string lf;                                                  // CRLF -> LF, so a checkout with Windows line endings still compares equal
+    lf.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i)
+        if (!(s[i] == '\r' && i + 1 < s.size() && s[i + 1] == '\n')) lf += s[i];
+    return lf;
 }
 
 int main() {
