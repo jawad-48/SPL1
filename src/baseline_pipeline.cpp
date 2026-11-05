@@ -23,6 +23,18 @@ Part partOfTargetRow(size_t targetRow, const SplitBoundaries& b) {
     return Part::Test;
 }
 
+GdResult fitOnTargetsBefore(LinearModel& model, const SampleSet& samples, size_t trainEndRow, const GdOptions& options, size_t& trainSamples) {
+    Matrix trainX;
+    std::vector<double> trainY;
+    for (const Sample& sample : samples.samples) {
+        if (sample.targetRow >= trainEndRow) continue;
+        trainX.push_back(sample.x);
+        trainY.push_back(sample.y);
+    }
+    trainSamples = trainX.size();
+    return model.fit(trainX, trainY, options);
+}
+
 static void addPrediction(Predictions& p, const Sample& s, const LinearModel& model) {
     p.targetRows.push_back(s.targetRow);
     p.actual.push_back(s.y);
@@ -48,22 +60,13 @@ BaselineResult runBaselineOnSeries(const TrafficSeries& series, const BaselineCo
         r.droppedMissing = set.droppedMissing;
         r.droppedIrregular = set.droppedIrregular;
 
-        // 1. training samples: only those whose TARGET lies in the training period
-        Matrix trainX;
-        std::vector<double> trainY;
-        for (const Sample& sample : set.samples) {
-            if (partOfTargetRow(sample.targetRow, result.split) != Part::Train) continue;
-            trainX.push_back(sample.x);
-            trainY.push_back(sample.y);
-        }
-        r.trainSamples = trainX.size();
-
-        // 2. fit (scaling and weights come from these training samples alone)
+        // 1.-2. fit on the samples whose TARGET lies in the training period (scaling and weights come from
+        //       these training samples alone; the selection rule lives in fitOnTargetsBefore)
         LinearModel model;
         try {
-            r.gd = model.fit(trainX, trainY, config.gd);
+            r.gd = fitOnTargetsBefore(model, set, result.split.trainEnd, config.gd, r.trainSamples);
         } catch (const std::invalid_argument& e) {
-            throw std::runtime_error("sensor " + r.sensorId + ": cannot train, " + e.what() + dp::fmt(" (%zu training samples)", trainX.size()));
+            throw std::runtime_error("sensor " + r.sensorId + ": cannot train, " + e.what() + dp::fmt(" (%zu training samples)", r.trainSamples));
         }
         r.olsAvailable = model.olsAvailable();
         r.trainRmseGd = model.trainRmseGradientDescent();

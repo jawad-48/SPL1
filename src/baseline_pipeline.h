@@ -43,6 +43,13 @@ enum class Part { Train, Validation, Test };
 SplitBoundaries chronologicalBoundaries(size_t rows, double trainFraction, double validationFraction);
 Part partOfTargetRow(size_t targetRow, const SplitBoundaries& boundaries);
 
+// Fits `model` (scaling and weights) on the samples whose TARGET row is before trainEndRow (exclusive) and on
+// nothing else. This is the single place where "which samples may train a model" is decided: the baseline
+// experiment calls it with the end of the training period, and the routing forecaster calls it with its
+// training cutoff. `trainSamples` receives how many samples were used (also set when fitting then throws).
+// Throws std::invalid_argument (from LinearModel::fit) if there are too few samples.
+GdResult fitOnTargetsBefore(LinearModel& model, const SampleSet& samples, size_t trainEndRow, const GdOptions& options, size_t& trainSamples);
+
 struct Predictions {
     std::vector<size_t> targetRows;         // which row each prediction is for
     std::vector<double> actual;             // the real speed at that row
