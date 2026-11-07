@@ -1,0 +1,76 @@
+LINEAR REGRESSION BASELINE REPORT
+=================================
+Data file   : data/traffic_data.csv
+Rows        : 576 (2012-03-01 06:00:00 -> 2012-03-03 05:55:00, 2.00 days, 5-minute steps)
+Sensors     : 716328, 716331, 716337, 717446, 717456, 773062 (6 sensors, 0 extra columns ignored)
+Target      : speed of the same sensor 3 steps (15 min) after the forecast time
+Features    : 6 lags = speed at t, t-1, ..., t-5 (the last 30 min); nothing later than t
+Model       : one Linear Regression per sensor, batch gradient descent (at most 20000 epochs, tolerance 1e-12);
+              inputs and target standardised with TRAINING statistics only
+Baseline    : persistence = the most recent reading carried forward
+Randomness  : none (weights start at zero), so every run gives the same numbers
+Unit        : mph (METR-LA convention); MAE and RMSE, lower is better
+
+NOTES AND WARNINGS
+  * The data spans only 2.00 days (< 7) and the test part is a single stretch of 7.25 hours, so these numbers
+    check that the pipeline works; they are NOT a reliable estimate of forecasting accuracy.
+  * Values filled by the cleaning policy (last reading carried forward up to 30 min) look like real readings in the cleaned
+    file, so they are used as inputs and targets. Carried-forward targets are easy for persistence to predict.
+
+SPLIT (chronological; a sample belongs to the part containing its TARGET row)
+  train       rows [0, 403)   2012-03-01 06:00:00 -> 2012-03-02 15:30:00
+  validation  rows [403, 489)   2012-03-02 15:35:00 -> 2012-03-02 22:40:00
+  test        rows [489, 576)   2012-03-02 22:45:00 -> 2012-03-03 05:55:00
+  fractions   train 0.70 / validation 0.15 / test 0.15 of the rows; validation is reported but nothing was tuned on it
+
+SAMPLES PER SENSOR
+  sensor   candidates  usable  dropped(missing)  dropped(grid)  train  validation  test
+  716328          568     568                 0              0    395          86    87
+  716331          568     568                 0              0    395          86    87
+  716337          568     568                 0              0    395          86    87
+  717446          568     568                 0              0    395          86    87
+  717456          568     568                 0              0    395          86    87
+  773062          568     568                 0              0    395          86    87
+
+TRAINING CHECK (training RMSE in mph: gradient descent vs the exact least-squares solution)
+  sensor   epochs  converged  gradient-descent    exact
+  716328     1054  yes                  7.2370   7.2370
+  716331     2164  yes                  7.1579   7.1579
+  716337     1343  yes                  5.3737   5.3737
+  717446     1600  yes                  7.4994   7.4994
+  717456     1664  yes                  6.7685   6.7685
+  773062     1909  yes                  4.6011   4.6011
+
+COEFFICIENTS (mph; prediction = intercept + sum of coefficient * speed(t - k))
+  sensor   intercept   lag_0   lag_1   lag_2   lag_3   lag_4   lag_5
+  716328     21.3531   0.7699  -0.0581  -0.2098   0.0406   0.1463  -0.0585
+  716331      5.0109   0.6760   0.0925   0.0889  -0.0330  -0.1050   0.1770
+  716337      9.6133   0.6792   0.1298   0.0187   0.0436  -0.0291  -0.0137
+  717446      5.6824   0.6226   0.1527   0.0034   0.0319  -0.0573   0.1316
+  717456      9.3501   0.4908   0.0656   0.2110   0.2742  -0.0397  -0.1519
+  773062      3.9909   0.3900   0.1799   0.1151   0.0491   0.1305   0.0677
+  (neighbouring lags are strongly correlated, so individual coefficients are not reliable on their own)
+
+RESULTS ON VALIDATION DATA (held-out; mph)
+                  Linear Regression   |    Persistence      | RMSE change
+  sensor       n       MAE      RMSE   |     MAE      RMSE   | vs persist.
+  716328      86 |  4.0057   6.0603 |  3.7934   5.7152 |   +6.0%
+  716331      86 |  4.3667   5.8824 |  4.7308   6.5444 |  -10.1%
+  716337      86 |  2.2166   3.4593 |  2.4593   3.7840 |   -8.6%
+  717446      86 |  5.2744   6.8469 |  6.0967   7.6422 |  -10.4%
+  717456      86 |  2.4929   5.5987 |  2.6350   5.9450 |   -5.8%
+  773062      86 |  3.4457   6.2425 |  3.8052   6.5004 |   -4.0%
+  ALL        516 |  3.6337   5.7806 |  3.9201   6.1348 |   -5.8%
+
+RESULTS ON TEST DATA (held-out; mph)
+                  Linear Regression   |    Persistence      | RMSE change
+  sensor       n       MAE      RMSE   |     MAE      RMSE   | vs persist.
+  716328      87 |  4.1130   5.9816 |  4.2659   6.3451 |   -5.7%
+  716331      87 |  6.3821   8.6413 |  6.8399   9.3878 |   -8.0%
+  716337      87 |  4.3484   6.3376 |  4.5879   6.9307 |   -8.6%
+  717446      87 |  5.8154   7.8226 |  6.3883   8.5988 |   -9.0%
+  717456      87 |  5.4156   7.6103 |  5.3823   8.3535 |   -8.9%
+  773062      87 |  3.0885   4.2742 |  3.3851   4.5802 |   -6.7%
+  ALL        522 |  4.8605   6.9282 |  5.1416   7.5402 |   -8.1%
+
+RMSE change = (Linear Regression RMSE - persistence RMSE) / persistence RMSE; negative means Linear Regression had the smaller error.
