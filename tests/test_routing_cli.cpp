@@ -306,6 +306,123 @@ static void testFilesAndDatasets() {
     expect("files: a directory given as the traffic path is refused, not crashed on", route("716328", "773062", {}, "data").code == 1);
 }
 
+// ------------------------------------------------------------------------------------------------------------------
+// route names r1..r6 and the interactive "where are you / where do you want to go" questions
+
+static Run runAsking(const std::vector<std::string>& args, const std::string& input) {
+    std::istringstream in(input);
+    std::ostringstream o, e;
+    Run r;
+    r.code = routing::runRoutingCli(args, in, o, e);
+    r.out = o.str();
+    r.err = e.str();
+    return r;
+}
+
+static std::vector<std::string> dataArgs(const std::vector<std::string>& extra = std::vector<std::string>()) {
+    std::vector<std::string> a = {"--row", "489", "--traffic", TRAFFIC, "--distances", DIST};
+    a.insert(a.end(), extra.begin(), extra.end());
+    return a;
+}
+
+static size_t countOf(const std::string& text, const std::string& needle) {
+    size_t n = 0, pos = 0;
+    while ((pos = text.find(needle, pos)) != std::string::npos) { ++n; pos += needle.size(); }
+    return n;
+}
+
+static void testRouteNames() {
+    const baseline::BaselineConfig cfg;
+    const baseline::TrafficSeries series = baseline::loadTrafficSeries(TRAFFIC);
+    const std::vector<routing::DistanceRecord> records = routing::loadSensorDistances(DIST);
+    const routing::SpeedForecaster f = routing::SpeedForecaster::train(series, cfg);
+
+    expect("names: --help explains the route names", has(run({"--help"}).out, "Route names: r1 = 716328, r2 = 716331, r3 = 716337, r4 = 717446, r5 = 717456, r6 = 773062"));
+    const Run byName = route("r2", "r3", {"--row", "489"});
+    const Run byId = route("716331", "716337", {"--row", "489"});
+    expect("names: --from/--to accept r1..r6 and give exactly the same route as the sensor IDs", byName.code == 0 && !fromMarker(byName.out, "Fastest route:").empty() && fromMarker(byName.out, "Fastest route:") == fromMarker(byId.out, "Fastest route:"));
+    expect("names: capital R and a mix of names and IDs also work", route("R1", "R6", {"--row", "489"}).code == 0 && route("r1", "773062", {"--row", "489"}).code == 0 && route("716328", "r6", {"--row", "489"}).code == 0);
+    bool every = true;
+    for (size_t i = 0; i < 6; ++i) every = every && route("r" + std::to_string(i + 1), id(i), {"--row", "489"}).code == 0 && has(route("r" + std::to_string(i + 1), id(i), {"--row", "489"}).out, "Fastest route: " + id(i) + "\n");
+    expect("names: r1..r6 are the six sensors in order (r1 = 716328 ... r6 = 773062)", every);
+
+    expect("names: the header shows the legend and the chosen route in both forms", has(byName.out, "Route names    : r1 = 716328, r2 = 716331, r3 = 716337, r4 = 717446, r5 = 717456, r6 = 773062") && has(byName.out, "From / To      : 716331 -> 716337  (r2 -> r3)"));
+    bool table = true;
+    for (size_t i = 0; i < 6; ++i) table = table && has(byName.out, "  r" + std::to_string(i + 1) + "  " + id(i) + "  ");
+    expect("names: every line of the forecast table starts with the sensor's route name", table);
+    const routing::RouteResult expected = routing::planRoute(series, f, records, 489, id(1), id(2));
+    std::string names;
+    for (size_t i = 0; i < expected.path.size(); ++i) {
+        size_t k = 0;
+        while (id(k) != expected.path[i]) ++k;
+        names += (i ? " -> r" : "r") + std::to_string(k + 1);
+    }
+    expect("names: the route is also printed in route names (r2 -> r1 -> r3 style), matching the library's path", expected.path.size() >= 3 && has(byName.out, "  In route names: " + names + "\n"));
+
+    const char* bad[] = {"r0", "r7", "r", "r10", "rr", "R 1", "r1 ", " r1", "route1", "1"};
+    bool allRefused = true;
+    for (const char* t : bad) allRefused = allRefused && route(t, "773062", {"--row", "489"}).code == 2 && route("716328", t, {"--row", "489"}).code == 2;
+    expect("names: r0, r7, r, r10, rr, 'R 1', names with spaces, route1 and a bare 1 are refused (exit 2)", allRefused);
+    Run r7 = route("r7", "r1", {"--row", "489"});
+    expect("names: the refusal names the bad value and tells about r1 to r6", r7.code == 2 && has(r7.err, "--from 'r7'") && has(r7.err, "r1 to r6") && r7.out.empty());
+
+    baseline::TrafficSeries hole = syntheticSeries(400);
+    hole.speeds[1][297] = NaN;
+    const std::string traffic = writeFile("names_hole_traffic.csv", trafficCsv(hole));
+    Run un = route("r1", "r3", {"--row", "300"}, traffic);
+    expect("names: an unavailable sensor is listed with its route name too", un.code == 0 && has(un.out, "  r2  716331  unavailable:"));
+}
+
+static void testInteractive() {
+    Run explicit1 = route("716331", "716328", {"--row", "489"});
+    const std::string expectedRoute = fromMarker(explicit1.out, "Fastest route:");
+
+    Run basic = runAsking(dataArgs(), "r2\nr1\n");
+    expect("ask: with no --from/--to the program asks 'Where are you now?' then 'Where do you want to go?'", basic.code == 0 && has(basic.out, "Where are you now?") && has(basic.out, "Where do you want to go?") && basic.err.empty());
+    expect("ask: the question comes first and the destination question second", basic.out.find("Where are you now?") < basic.out.find("Where do you want to go?"));
+    bool menu = has(basic.out, "Routes (sensors):");
+    for (size_t i = 0; i < 6; ++i) menu = menu && has(basic.out, "  r" + std::to_string(i + 1) + "  " + id(i) + "\n");
+    expect("ask: the menu lists r1..r6 with their sensor IDs before the questions", menu && basic.out.find("Routes (sensors):") < basic.out.find("Where are you now?"));
+    expect("ask: answering r2 and r1 gives exactly the route of --from 716331 --to 716328", !expectedRoute.empty() && fromMarker(basic.out, "Fastest route:") == expectedRoute && has(basic.out, "From / To      : 716331 -> 716328  (r2 -> r1)"));
+
+    Run styles = runAsking(dataArgs(), "  R2 \r\n716328\r\n");
+    expect("ask: capital letters, surrounding spaces, Windows line endings and plain sensor IDs are accepted", styles.code == 0 && fromMarker(styles.out, "Fastest route:") == expectedRoute);
+
+    Run retry = runAsking(dataArgs(), "r9\nabc\nr2\n\nr1\n");      // 2 bad answers for the origin, 1 for the destination (3 tries are allowed per question)
+    expect("ask: invalid answers are explained and asked again; the valid answers are used", retry.code == 0 && countOf(retry.out, "is not a route") == 3 && has(retry.out, "'r9'") && has(retry.out, "'abc'") && fromMarker(retry.out, "Fastest route:") == expectedRoute);
+    expect("ask: the destination is also asked again after a bad answer", runAsking(dataArgs(), "r2\nzzz\nr1\n").code == 0 && fromMarker(runAsking(dataArgs(), "r2\nzzz\nr1\n").out, "Fastest route:") == expectedRoute);
+
+    Run giveUp = runAsking(dataArgs(), "x\ny\nz\nr1\nr2\n");
+    expect("ask: three invalid answers in a row end the program (exit 2) without a route", giveUp.code == 2 && has(giveUp.err, "after 3 tries") && !has(giveUp.out, "Fastest route") && countOf(giveUp.out, "is not a route") == 3);
+    Run eof = runAsking(dataArgs(), "");
+    expect("ask: input that ends before an answer is an error (exit 2) that points to --from/--to", eof.code == 2 && has(eof.err, "input ended") && has(eof.err, "--from and --to") && !has(eof.out, "Fastest route"));
+    expect("ask: input that ends after the first answer is also an error (exit 2)", runAsking(dataArgs(), "r2").code == 2 && runAsking(dataArgs(), "r2\n").code == 2);
+
+    std::vector<std::string> onlyFrom = dataArgs({"--from", "r1"});
+    Run askTo = runAsking(onlyFrom, "r6\n");
+    Run explicit16 = route("r1", "r6", {"--row", "489"});
+    expect("ask: with only --from given, only the destination is asked", askTo.code == 0 && has(askTo.out, "Where do you want to go?") && !has(askTo.out, "Where are you now?") && fromMarker(askTo.out, "Fastest route:") == fromMarker(explicit16.out, "Fastest route:"));
+    Run askFrom = runAsking(dataArgs({"--to", "r6"}), "r1\n");
+    expect("ask: with only --to given, only the origin is asked", askFrom.code == 0 && has(askFrom.out, "Where are you now?") && !has(askFrom.out, "Where do you want to go?") && fromMarker(askFrom.out, "Fastest route:") == fromMarker(explicit16.out, "Fastest route:"));
+    Run both = runAsking(dataArgs({"--from", "r1", "--to", "r6"}), "r3\nr4\n");
+    expect("ask: with --from and --to given nothing is asked and the answers waiting on input are ignored", both.code == 0 && !has(both.out, "Where are you now?") && !has(both.out, "Routes (sensors):") && fromMarker(both.out, "Fastest route:") == fromMarker(explicit16.out, "Fastest route:"));
+
+    Run same = runAsking(dataArgs(), "r3\nr3\n");
+    expect("ask: the same place twice gives ETA 0.000 minutes", same.code == 0 && has(same.out, "Total ETA: 0.000 minutes") && has(same.out, "Fastest route: 716337\n"));
+
+    Run badOption = runAsking({"--row", "abc", "--traffic", TRAFFIC, "--distances", DIST}, "r1\nr2\n");
+    expect("ask: a wrong option is reported before any question is asked (exit 2, nothing asked)", badOption.code == 2 && !has(badOption.out, "Where are you now?") && badOption.out.empty());
+    Run badFile = runAsking({"--traffic", "no_such_traffic_file.csv", "--distances", DIST}, "r1\nr2\n");
+    expect("ask: a missing file is reported before any question is asked (exit 1, nothing asked)", badFile.code == 1 && !has(badFile.out, "Where are you now?") && has(badFile.err, "no_such_traffic_file.csv"));
+    Run badIdThenAsk = runAsking({"--from", "r9", "--traffic", TRAFFIC, "--distances", DIST}, "r1\nr2\n");
+    expect("ask: a wrong --from value is refused (exit 2), not replaced by a question", badIdThenAsk.code == 2 && !has(badIdThenAsk.out, "Where"));
+
+    Run tooEarly = runAsking({"--row", "10", "--traffic", TRAFFIC, "--distances", DIST}, "r1\nr2\n");
+    expect("ask: after valid answers an origin inside the training period is still refused (exit 1) with the reason", tooEarly.code == 1 && has(tooEarly.err, "training period") && !has(tooEarly.out, "Fastest route"));
+
+    expect("ask: the version without an input stream never asks and still requires --from and --to (exit 2)", run({"--from", "r1"}).code == 2 && has(run({"--from", "r1"}).err, "--from and --to are required") && run({}).code == 2);
+}
+
 int main() {
     testHelpAndUsage();
     testValidRoutes();
@@ -315,6 +432,8 @@ int main() {
     testInvalidTimestampsAndRows();
     testUnreachable();
     testFilesAndDatasets();
+    testRouteNames();
+    testInteractive();
     for (const std::string& path : createdFiles) std::remove(path.c_str());
     return tu::summary();
 }

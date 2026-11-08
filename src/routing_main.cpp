@@ -11,5 +11,5 @@
 int main(int argc, char** argv) {
     std::vector<std::string> args;
     for (int i = 1; i < argc; ++i) args.push_back(argv[i]);
-    return routing::runRoutingCli(args, std::cout, std::cerr);
+    return routing::runRoutingCli(args, std::cin, std::cout, std::cerr);
 }
