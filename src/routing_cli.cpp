@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <fstream>
+#include <cctype>
 #include <iostream>
 #include <map>
 #include <sstream>
@@ -27,6 +28,8 @@ struct CliError {
     std::string message;
 };
 
+std::string routeNameList();     // defined below
+
 std::string sensorList() {
     std::string s;
     for (size_t i = 0; i < dp::SELECTED_SENSORS.size(); ++i) s += (i ? ", " : "") + dp::SELECTED_SENSORS[i];
@@ -36,11 +39,12 @@ std::string sensorList() {
 void printHelp(std::ostream& out) {
     out << "fastest route: Linear Regression speed forecast + Dijkstra\n"
            "\n"
-           "Usage: routing --from SENSOR --to SENSOR [--row N | --time \"YYYY-MM-DD HH:MM:SS\"]\n"
+           "Usage: routing [--from SENSOR] [--to SENSOR] [--row N | --time \"YYYY-MM-DD HH:MM:SS\"]\n"
            "               [--traffic PATH] [--distances PATH]\n"
            "\n"
-           "  --from SENSOR      origin sensor ID (required)\n"
-           "  --to SENSOR        destination sensor ID (required)\n"
+           "  --from SENSOR      where you are: a sensor ID or a route name r1 to r6\n"
+           "  --to SENSOR        where you want to go: a sensor ID or a route name r1 to r6\n"
+           "                     (if --from and/or --to are left out, the program asks for them)\n"
            "  --row N            forecast from dataset row N (0 = first data row)\n"
            "  --time TIMESTAMP   forecast from the row with exactly this timestamp, e.g. \"2012-06-27 17:55:00\"\n"
            "                     (--row and --time cannot be combined; if neither is given the LATEST row is used)\n"
@@ -49,6 +53,7 @@ void printHelp(std::ostream& out) {
            "  --help             show this text\n"
            "\n"
            "Sensors: " << sensorList() << "\n"
+           "Route names: " << routeNameList() << "\n"
            "The forecast origin must not lie inside the training period (the first 70% of the rows).\n"
            "The forecast is made for 15 minutes after the origin row; nothing after the origin row is used.\n"
            "\n"
@@ -60,9 +65,54 @@ bool isValueOption(const std::string& a) {
     return a == "--from" || a == "--to" || a == "--traffic" || a == "--distances" || a == "--time" || a == "--row";
 }
 
-void requireSensor(const std::string& option, const std::string& id) {
-    if (std::find(dp::SELECTED_SENSORS.begin(), dp::SELECTED_SENSORS.end(), id) == dp::SELECTED_SENSORS.end())
-        throw CliError{EXIT_USAGE, "ERROR: " + option + " '" + id + "' is not one of the six sensors. Valid sensors: " + sensorList()};
+// Route names: r1 to r6 follow the order of dp::SELECTED_SENSORS (r1 = 716328 ... r6 = 773062).
+std::string routeName(const std::string& sensorId) {
+    for (size_t i = 0; i < dp::SELECTED_SENSORS.size(); ++i) if (dp::SELECTED_SENSORS[i] == sensorId) return "r" + std::to_string(i + 1);
+    return "";
+}
+
+std::string routeNameList() {
+    std::string s;
+    for (size_t i = 0; i < dp::SELECTED_SENSORS.size(); ++i) s += (i ? ", r" : "r") + std::to_string(i + 1) + " = " + dp::SELECTED_SENSORS[i];
+    return s;
+}
+
+// A sensor ID, or a route name r1 to r6 (r or R). Exact match, no trimming. Returns false if `text` is neither.
+bool resolveSensor(const std::string& text, std::string& sensorId) {
+    if (std::find(dp::SELECTED_SENSORS.begin(), dp::SELECTED_SENSORS.end(), text) != dp::SELECTED_SENSORS.end()) { sensorId = text; return true; }
+    if (text.size() == 2 && (text[0] == 'r' || text[0] == 'R') && text[1] >= '1' && text[1] < '1' + static_cast<char>(dp::SELECTED_SENSORS.size())) {
+        sensorId = dp::SELECTED_SENSORS[static_cast<size_t>(text[1] - '1')];
+        return true;
+    }
+    return false;
+}
+
+std::string requireSensor(const std::string& option, const std::string& text) {
+    std::string id;
+    if (!resolveSensor(text, id))
+        throw CliError{EXIT_USAGE, "ERROR: " + option + " '" + text + "' is not one of the six sensors. Valid sensors: " + sensorList() + " (or the route names r1 to r6)"};
+    return id;
+}
+
+// Asks one question on `in`/`out`; accepts r1 to r6 or a sensor ID (surrounding spaces ignored); 3 tries.
+std::string askSensor(std::istream& in, std::ostream& out, const std::string& question) {
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        out << question << " " << std::flush;
+        std::string line;
+        if (!std::getline(in, line))
+            throw CliError{EXIT_USAGE, "ERROR: no answer was entered (the input ended). Give --from and --to on the command line instead."};
+        line = dp::trim(line);
+        std::string id;
+        if (resolveSensor(line, id)) return id;
+        out << "  '" << line << "' is not a route. Type r1 to r6, or one of the sensor IDs.\n";
+    }
+    throw CliError{EXIT_USAGE, "ERROR: no valid route was entered after 3 tries."};
+}
+
+void printRouteMenu(std::ostream& out) {
+    out << "Routes (sensors):\n";
+    for (size_t i = 0; i < dp::SELECTED_SENSORS.size(); ++i) out << "  r" << i + 1 << "  " << dp::SELECTED_SENSORS[i] << "\n";
+    out << "\n";
 }
 
 void requireReadableFile(const std::string& option, const std::string& what, const std::string& path) {
@@ -76,7 +126,10 @@ std::string describeOrigin(const baseline::TrafficSeries& series, size_t row) {
 
 }  // namespace
 
-int runRoutingCli(const std::vector<std::string>& args, std::ostream& out, std::ostream& err) {
+namespace {
+
+// `in` == nullptr: never ask questions (--from and --to are required).
+int runImpl(const std::vector<std::string>& args, std::istream* in, std::ostream& out, std::ostream& err) {
     try {
         // ---------------------------------------------------------------- 1. command line (nothing is read from disk yet)
         if (std::find(args.begin(), args.end(), "--help") != args.end() || std::find(args.begin(), args.end(), "-h") != args.end()) {
@@ -91,10 +144,11 @@ int runRoutingCli(const std::vector<std::string>& args, std::ostream& out, std::
             if (v.count(a)) throw CliError{EXIT_USAGE, "ERROR: option " + a + " was given twice."};
             v[a] = args[++i];
         }
-        if (!v.count("--from") || !v.count("--to")) throw CliError{EXIT_USAGE, "ERROR: --from and --to are required. Try --help."};
-        const std::string source = v["--from"], destination = v["--to"];
-        requireSensor("--from", source);
-        requireSensor("--to", destination);
+        const bool mustAsk = !v.count("--from") || !v.count("--to");
+        if (mustAsk && in == nullptr) throw CliError{EXIT_USAGE, "ERROR: --from and --to are required. Try --help."};
+        std::string source, destination;
+        if (v.count("--from")) source = requireSensor("--from", v["--from"]);
+        if (v.count("--to")) destination = requireSensor("--to", v["--to"]);
         if (v.count("--row") && v.count("--time")) throw CliError{EXIT_USAGE, "ERROR: use either --row or --time, not both."};
 
         bool haveRow = false, haveTime = false;
@@ -118,6 +172,16 @@ int runRoutingCli(const std::vector<std::string>& args, std::ostream& out, std::
         // ---------------------------------------------------------------- 2. load the two datasets (existing loaders)
         requireReadableFile("--traffic", "traffic", trafficPath);
         requireReadableFile("--distances", "distance", distancePath);
+
+        // ---- "where am I, where do I want to go": asked only when --from and/or --to were left out, and only after every
+        //      other argument and both file names have been checked, so a wrong option never wastes the answers
+        if (mustAsk) {
+            out << "Where are you now, and where do you want to go?\n\n";
+            printRouteMenu(out);
+            if (!v.count("--from")) source = askSensor(*in, out, "Where are you now?        (r1-r6 or sensor ID):");
+            if (!v.count("--to")) destination = askSensor(*in, out, "Where do you want to go?  (r1-r6 or sensor ID):");
+            out << "\n";
+        }
         baseline::TrafficSeries series;
         try {
             series = baseline::loadTrafficSeries(trafficPath);
@@ -170,7 +234,8 @@ int runRoutingCli(const std::vector<std::string>& args, std::ostream& out, std::
         out << "Training       : rows 0 to " << split.trainEnd - 1 << " (" << dp::formatTimestamp(series.times.front()) << " to " << dp::formatTimestamp(series.times[split.trainEnd - 1])
             << "), one model per sensor, " << config.features.lags << " readings (" << historyMinutes << " min) -> speed " << horizonMinutes << " min ahead\n";
         out << "Forecast origin: " << describeOrigin(series, origin) << " [" << originHow << "]\n";
-        out << "From / To      : " << source << " -> " << destination << "\n\n";
+        out << "Route names    : " << routeNameList() << "\n";
+        out << "From / To      : " << source << " -> " << destination << "  (" << routeName(source) << " -> " << routeName(destination) << ")\n\n";
         out << "Training the six Linear Regression models ...\n" << std::flush;
 
         SpeedForecaster forecaster;
@@ -187,8 +252,8 @@ int runRoutingCli(const std::vector<std::string>& args, std::ostream& out, std::
             << dp::formatTimestamp(snapshot.originTime) << ":\n";
         for (size_t i = 0; i < snapshot.sensors.size(); ++i) {
             const SensorForecast& s = snapshot.sensors[i];
-            if (s.available) out << "  " << s.sensorId << "  " << dp::fmt("%6.2f", s.speedMph) << " mph\n";
-            else out << "  " << s.sensorId << "  unavailable: " << s.reason << "\n";
+            if (s.available) out << "  " << routeName(s.sensorId) << "  " << s.sensorId << "  " << dp::fmt("%6.2f", s.speedMph) << " mph\n";
+            else out << "  " << routeName(s.sensorId) << "  " << s.sensorId << "  unavailable: " << s.reason << "\n";
         }
         out << "\n";
 
@@ -210,6 +275,9 @@ int runRoutingCli(const std::vector<std::string>& args, std::ostream& out, std::
         out << "Fastest route: ";
         for (size_t i = 0; i < route.path.size(); ++i) out << (i ? " -> " : "") << route.path[i];
         out << "\n";
+        out << "  In route names: ";
+        for (size_t i = 0; i < route.path.size(); ++i) out << (i ? " -> " : "") << routeName(route.path[i]);
+        out << "\n";
         if (route.legs.empty()) {
             out << "  The origin and the destination are the same sensor: no travel needed.\n";
         } else {
@@ -230,6 +298,16 @@ int runRoutingCli(const std::vector<std::string>& args, std::ostream& out, std::
         err << "ERROR: " << e.what() << "\n";
         return EXIT_DATA;
     }
+}
+
+}  // namespace
+
+int runRoutingCli(const std::vector<std::string>& args, std::ostream& out, std::ostream& err) {
+    return runImpl(args, nullptr, out, err);
+}
+
+int runRoutingCli(const std::vector<std::string>& args, std::istream& in, std::ostream& out, std::ostream& err) {
+    return runImpl(args, &in, out, err);
 }
 
 }  // namespace routing
