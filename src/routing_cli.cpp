@@ -1,6 +1,7 @@
 #include "routing_cli.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <cctype>
@@ -9,6 +10,7 @@
 #include <sstream>
 #include <stdexcept>
 
+#include "clock_origin.h"
 #include "route_planner.h"
 #include "speed_forecaster.h"
 #include "travel_time_graph.h"
@@ -47,7 +49,12 @@ void printHelp(std::ostream& out) {
            "                     (if --from and/or --to are left out, the program asks for them)\n"
            "  --row N            forecast from dataset row N (0 = first data row)\n"
            "  --time TIMESTAMP   forecast from the row with exactly this timestamp, e.g. \"2012-06-27 17:55:00\"\n"
-           "                     (--row and --time cannot be combined; if neither is given the LATEST row is used)\n"
+           "  --auto-clock       choose the origin from this computer's clock: same weekday and time of day (5-minute grid)\n"
+           "                     in the dataset, latest eligible date. A HISTORICAL REPLAY of 2012 data, not live traffic.\n"
+           "                     The routing program does this by default when no origin option is given.\n"
+           "  --clock TIMESTAMP  like --auto-clock, but with a simulated local clock, e.g. \"2026-11-11 11:20:00\" (demos, tests)\n"
+           "  --latest           use the LATEST row of the dataset\n"
+           "                     (--row, --time, --latest and --auto-clock/--clock cannot be combined)\n"
            "  --traffic PATH     cleaned traffic file   (default " << DEFAULT_TRAFFIC << ")\n"
            "  --distances PATH   sensor distance file   (default " << DEFAULT_DISTANCES << ")\n"
            "  --help             show this text\n"
@@ -62,7 +69,7 @@ void printHelp(std::ostream& out) {
 }
 
 bool isValueOption(const std::string& a) {
-    return a == "--from" || a == "--to" || a == "--traffic" || a == "--distances" || a == "--time" || a == "--row";
+    return a == "--from" || a == "--to" || a == "--traffic" || a == "--distances" || a == "--time" || a == "--row" || a == "--clock";
 }
 
 // Route names: r1 to r6 follow the order of dp::SELECTED_SENSORS (r1 = 716328 ... r6 = 773062).
@@ -124,6 +131,41 @@ std::string describeOrigin(const baseline::TrafficSeries& series, size_t row) {
     return dp::fmt("row %zu (%s)", row, dp::formatTimestamp(series.times[row]).c_str());
 }
 
+// Why a sensor has no forecast, in plain words, from the cleaned file itself: which of the readings the forecast needs are
+// empty and when the sensor last had a real reading. Nothing is invented; this only reads the series.
+std::string explainUnavailable(const baseline::TrafficSeries& series, size_t origin, size_t sensor, int lags, const std::string& reason) {
+    const std::string name = routeName(series.sensors[sensor]) + " (" + series.sensors[sensor] + ")";
+    const size_t n = static_cast<size_t>(lags);
+    // same order of checks as SpeedForecaster::predictAt: history length, then the time grid, then the readings themselves
+    if (origin + 1 < n) return "  Why " + name + ": only " + std::to_string(origin + 1) + " readings exist up to the origin, " + std::to_string(n) + " are needed.";
+    for (size_t i = origin + 1 - n + 1; i <= origin; ++i) {
+        const long long d = series.times[i] - series.times[i - 1];
+        if (d != dp::STEP_SECONDS)
+            return "  Why " + name + ": the timestamps of its last " + std::to_string(n) + " readings are not exactly 5 minutes apart (" + dp::formatTimestamp(series.times[i - 1]) +
+                   " to " + dp::formatTimestamp(series.times[i]) + " is " + std::to_string(d) + " s). A forecast needs an unbroken 5-minute series; no value was invented.";
+    }
+    std::vector<std::string> empty;
+    for (size_t k = 0; k < n; ++k) {
+        const double v = series.speeds[sensor][origin - k];
+        if (!std::isfinite(v) || v <= 0) empty.push_back(dp::formatTimestamp(series.times[origin - k]).substr(11, 8));
+    }
+    if (empty.empty()) return "  Why " + name + ": no forecast was made (" + reason + ").";
+    std::string list;
+    for (size_t i = 0; i < empty.size(); ++i) list += (i ? ", " : "") + empty[i];
+    std::string s = "  Why " + name + ": " + std::to_string(empty.size()) + " of its last " + std::to_string(n) + " readings are empty in the cleaned file (" + list + ")";
+    size_t r = origin;
+    while (true) {
+        const double v = series.speeds[sensor][r];
+        if (std::isfinite(v) && v > 0) break;
+        if (r == 0) { r = static_cast<size_t>(-1); break; }
+        --r;
+    }
+    if (r == static_cast<size_t>(-1)) s += "; it has no real reading before the origin";
+    else s += dp::fmt("; its last real reading was at %s, %zu steps (%zu min) before the origin", dp::formatTimestamp(series.times[r]).c_str(), origin - r, (origin - r) * 5);
+    s += ". The cleaning step carries a reading forward for at most 6 steps (30 min); a longer outage stays empty. No speed was invented.";
+    return s;
+}
+
 }  // namespace
 
 namespace {
@@ -139,6 +181,11 @@ int runImpl(const std::vector<std::string>& args, std::istream* in, std::ostream
         std::map<std::string, std::string> v;
         for (size_t i = 0; i < args.size(); ++i) {
             const std::string& a = args[i];
+            if (a == "--auto-clock" || a == "--latest") {
+                if (v.count(a)) throw CliError{EXIT_USAGE, "ERROR: option " + a + " was given twice."};
+                v[a] = "1";
+                continue;
+            }
             if (!isValueOption(a)) throw CliError{EXIT_USAGE, "ERROR: unknown option '" + a + "'. Try --help."};
             if (i + 1 >= args.size() || args[i + 1].compare(0, 2, "--") == 0) throw CliError{EXIT_USAGE, "ERROR: option " + a + " needs a value. Try --help."};
             if (v.count(a)) throw CliError{EXIT_USAGE, "ERROR: option " + a + " was given twice."};
@@ -150,6 +197,12 @@ int runImpl(const std::vector<std::string>& args, std::istream* in, std::ostream
         if (v.count("--from")) source = requireSensor("--from", v["--from"]);
         if (v.count("--to")) destination = requireSensor("--to", v["--to"]);
         if (v.count("--row") && v.count("--time")) throw CliError{EXIT_USAGE, "ERROR: use either --row or --time, not both."};
+        const bool autoClock = v.count("--auto-clock") || v.count("--clock");
+        if ((v.count("--latest") ? 1 : 0) + (autoClock ? 1 : 0) + (v.count("--row") || v.count("--time") ? 1 : 0) > 1)
+            throw CliError{EXIT_USAGE, "ERROR: choose only one way to select the origin: --row, --time, --latest, or --auto-clock/--clock."};
+        long long simulatedClock = 0;
+        if (v.count("--clock") && !dp::parseTimestamp(v["--clock"], simulatedClock))
+            throw CliError{EXIT_USAGE, "ERROR: --clock must look like 2026-11-11 11:20:00 (got '" + v["--clock"] + "')."};
 
         bool haveRow = false, haveTime = false;
         size_t requestedRow = 0;
@@ -221,6 +274,26 @@ int runImpl(const std::vector<std::string>& args, std::istream* in, std::ostream
             origin = static_cast<size_t>(it - series.times.begin());
             originHow = "selected with --time";
         }
+        std::string clockLines;
+        if (autoClock) {
+            int offset = 0;
+            const bool simulated = v.count("--clock") > 0;
+            long long clock = simulatedClock;
+            if (!simulated && !localClockSeconds(clock, offset))
+                throw CliError{EXIT_DATA, "ERROR: the computer's clock could not be read. Choose the origin yourself with --row or --time, or simulate a clock with --clock."};
+            ClockOrigin chosen;
+            if (!selectOriginForClock(series.times, earliest, clock, chosen, static_cast<size_t>(config.features.lags)))
+                throw CliError{EXIT_DATA, "ERROR: the dataset has no usable row for the clock time " + dp::formatTimestamp(clock) +
+                                          " (an allowed origin row at this time of day, with five regular 5-minute steps before it, is required). "
+                                          "Choose the origin yourself with --row or --time. No other time was substituted."};
+            origin = chosen.row;
+            originHow = chosen.sameWeekday ? "clock replay: same weekday and time of day, latest eligible date"
+                                           : "clock replay: NO eligible row on this weekday, so the latest eligible row with this time of day";
+            std::string zone = simulated ? "simulated with --clock" : dp::fmt("local time, UTC%c%02d:%02d", offset < 0 ? '-' : '+', std::abs(offset) / 60, std::abs(offset) % 60);
+            clockLines += "System clock   : " + dp::formatTimestamp(clock) + " (" + dp::weekdayName(clock) + ", " + zone + ")\n";
+            clockLines += "Replay mapping : clock " + dp::formatTimestamp(clock).substr(11, 5) + " (rounded down to the 5-minute grid) -> dataset " +
+                          dp::weekdayName(series.times[origin]) + " " + dp::formatTimestamp(series.times[origin]) + "\n";
+        }
         if (origin < earliest)
             throw CliError{EXIT_DATA, "ERROR: " + describeOrigin(series, origin) + " lies inside the training period (rows 0 to " + std::to_string(split.trainEnd - 1) +
                                       "). The models have already seen the data after it, so a forecast from there would use future information. The earliest allowed origin is " +
@@ -233,7 +306,12 @@ int runImpl(const std::vector<std::string>& args, std::istream* in, std::ostream
         out << "Distance data  : " << distancePath << " (" << distances.size() << " directed sensor pairs)\n";
         out << "Training       : rows 0 to " << split.trainEnd - 1 << " (" << dp::formatTimestamp(series.times.front()) << " to " << dp::formatTimestamp(series.times[split.trainEnd - 1])
             << "), one model per sensor, " << config.features.lags << " readings (" << historyMinutes << " min) -> speed " << horizonMinutes << " min ahead\n";
+        out << clockLines;
         out << "Forecast origin: " << describeOrigin(series, origin) << " [" << originHow << "]\n";
+        if (autoClock)
+            out << "Forecast target: " << dp::formatTimestamp(series.times[origin] + static_cast<long long>(config.features.horizonSteps) * dp::STEP_SECONDS)
+                << " (" << horizonMinutes << " min after the origin)\n"
+                << "Note           : historical replay of the 2012 data driven by the clock, NOT live traffic.\n";
         out << "Route names    : " << routeNameList() << "\n";
         out << "From / To      : " << source << " -> " << destination << "  (" << routeName(source) << " -> " << routeName(destination) << ")\n\n";
         out << "Training the six Linear Regression models ...\n" << std::flush;
@@ -255,6 +333,8 @@ int runImpl(const std::vector<std::string>& args, std::istream* in, std::ostream
             if (s.available) out << "  " << routeName(s.sensorId) << "  " << s.sensorId << "  " << dp::fmt("%6.2f", s.speedMph) << " mph\n";
             else out << "  " << routeName(s.sensorId) << "  " << s.sensorId << "  unavailable: " << s.reason << "\n";
         }
+        for (size_t i = 0; i < snapshot.sensors.size(); ++i)
+            if (!snapshot.sensors[i].available) out << explainUnavailable(series, origin, i, config.features.lags, snapshot.sensors[i].reason) << "\n";
         out << "\n";
 
         // ---------------------------------------------------------------- 6. travel-time graph + Dijkstra (existing planner)
@@ -289,6 +369,9 @@ int runImpl(const std::vector<std::string>& args, std::istream* in, std::ostream
             }
         }
         out << "Total ETA: " << dp::fmt("%.3f", route.etaMinutes) << " minutes\n";
+        for (size_t i = 0; i < route.unavailableSensors.size(); ++i)
+            out << "Note: sensor " << route.unavailableSensors[i].sensorId << " (" << routeName(route.unavailableSensors[i].sensorId)
+                << ") has no forecast, so no leg can start from it: routes passing through it were not considered (it can still be the destination).\n";
         out << "(Upstream-speed assumption and other limits: docs/predictive_routing.md.)\n";
         return EXIT_OK;
     } catch (const CliError& e) {
